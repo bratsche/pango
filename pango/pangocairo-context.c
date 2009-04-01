@@ -27,7 +27,15 @@
 
 #include <string.h>
 
-typedef struct _PangoCairoContextInfo PangoCairoContextInfo;
+typedef struct _PangoCairoContextInfo       PangoCairoContextInfo;
+typedef struct _PangoCairoShapeRendererInfo PangoCairoShapeRendererInfo;
+
+struct _PangoCairoShapeRendererInfo
+{
+  PangoCairoShapeRendererFunc shape_renderer_func;
+  gpointer                    shape_renderer_data;
+  GDestroyNotify              shape_renderer_notify;
+};
 
 struct _PangoCairoContextInfo
 {
@@ -37,25 +45,35 @@ struct _PangoCairoContextInfo
   cairo_font_options_t *surface_options;
   cairo_font_options_t *merged_options;
 
-  PangoCairoShapeRendererFunc shape_renderer_func;
-  gpointer                    shape_renderer_data;
-  GDestroyNotify              shape_renderer_notify;
+  GHashTable *shape_renderers;
 };
+
+static void
+free_shape_renderer_info (gpointer key,
+			  gpointer value,
+			  gpointer data)
+{
+  PangoCairoShapeRendererInfo *info = value;
+
+  if (info->shape_renderer_notify)
+    info->shape_renderer_notify (info->shape_renderer_data);
+
+  g_slice_free (PangoCairoShapeRendererInfo, info);
+}
 
 static void
 free_context_info (PangoCairoContextInfo *info)
 {
+  if (info->shape_renderers)
+    g_hash_table_foreach (info->shape_renderers,
+			  free_shape_renderer_info, NULL);
+
   if (info->set_options)
     cairo_font_options_destroy (info->set_options);
   if (info->surface_options)
     cairo_font_options_destroy (info->surface_options);
   if (info->merged_options)
     cairo_font_options_destroy (info->merged_options);
-
-  if (info->shape_renderer_notify)
-    info->shape_renderer_notify (info->shape_renderer_data);
-
-  g_slice_free (PangoCairoContextInfo, info);
 }
 
 static PangoCairoContextInfo *
@@ -325,18 +343,46 @@ pango_cairo_context_set_shape_renderer (PangoContext                *context,
 					gpointer                     data,
 					GDestroyNotify               dnotify)
 {
+  pango_cairo_context_set_shape_renderer_for_attr_type (context,
+							PANGO_ATTR_SHAPE,
+							func,
+							data,
+							dnotify);
+}
+
+void
+pango_cairo_context_set_shape_renderer_for_attr_type (PangoContext                *context,
+						      PangoAttrType                attr_type,
+						      PangoCairoShapeRendererFunc  func,
+						      gpointer                     data,
+						      GDestroyNotify               dnotify)
+{
   PangoCairoContextInfo *info;
+  PangoCairoShapeRendererInfo *renderer_info;
 
   g_return_if_fail (PANGO_IS_CONTEXT (context));
+  g_return_if_fail (pango_attr_type_is_a (attr_type, PANGO_ATTR_SHAPE));
 
-  info  = get_context_info (context, TRUE);
+  info = get_context_info (context, TRUE);
 
-  if (info->shape_renderer_notify)
-    info->shape_renderer_notify (info->shape_renderer_data);
+  if (!info->shape_renderers)
+    info->shape_renderers = g_hash_table_new (g_int_hash, g_int_equal);
 
-  info->shape_renderer_func   = func;
-  info->shape_renderer_data   = data;
-  info->shape_renderer_notify = dnotify;
+  renderer_info = g_hash_table_lookup (info->shape_renderers, GUINT_TO_POINTER (attr_type));
+  if (!renderer_info)
+    {
+      renderer_info = g_slice_new0 (PangoCairoShapeRendererInfo);
+      g_hash_table_insert (info->shape_renderers,
+			   GUINT_TO_POINTER (attr_type),
+			   renderer_info);
+    }
+
+  if (renderer_info->shape_renderer_notify)
+    renderer_info->shape_renderer_notify (renderer_info->shape_renderer_data);
+
+  renderer_info->shape_renderer_func   = func;
+  renderer_info->shape_renderer_data   = data;
+  renderer_info->shape_renderer_notify = dnotify;
 }
 
 /**
@@ -358,27 +404,42 @@ pango_cairo_context_set_shape_renderer (PangoContext                *context,
  * Since: 1.18
  */
 PangoCairoShapeRendererFunc
-pango_cairo_context_get_shape_renderer (PangoContext                *context,
-					gpointer                    *data)
+pango_cairo_context_get_shape_renderer (PangoContext *context,
+					gpointer     *data)
+{
+  return pango_cairo_context_get_shape_renderer_for_attr_type (context,
+							       PANGO_ATTR_SHAPE,
+							       data);
+}
+
+PangoCairoShapeRendererFunc
+pango_cairo_context_get_shape_renderer_for_attr_type (PangoContext   *context,
+						      PangoAttrType   attr_type,
+						      gpointer       *data)
 {
   PangoCairoContextInfo *info;
+  PangoCairoShapeRendererInfo *renderer_info;
 
   g_return_val_if_fail (PANGO_IS_CONTEXT (context), NULL);
+  g_return_val_if_fail (pango_attr_type_is_a (attr_type, PANGO_ATTR_SHAPE), NULL);
 
   info = get_context_info (context, FALSE);
 
   if (info)
     {
-      if (data)
-        *data = info->shape_renderer_data;
-      return info->shape_renderer_func;
+      renderer_info = g_hash_table_lookup (info->shape_renderers,
+					   GUINT_TO_POINTER (attr_type));
+      if (renderer_info)
+	{
+	  if (data)
+	    *data = renderer_info->shape_renderer_data;
+	  return renderer_info->shape_renderer_func;
+	}
     }
-  else
-    {
-      if (data)
-        *data = NULL;
-      return NULL;
-    }
+
+  if (data)
+    *data = NULL;
+  return NULL;
 }
 
 /**

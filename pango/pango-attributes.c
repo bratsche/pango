@@ -55,6 +55,7 @@ static PangoAttribute *pango_attr_size_new_internal (int                   size,
 
 
 static GHashTable *name_map = NULL;
+static GHashTable *type_map = NULL;
 
 /**
  * pango_attr_type_register:
@@ -68,18 +69,110 @@ static GHashTable *name_map = NULL;
 PangoAttrType
 pango_attr_type_register (const gchar *name)
 {
-  static guint current_type = 0x1000000;
-  guint type = current_type++;
+  return pango_attr_type_register_full (name, PANGO_ATTR_INVALID);
+}
 
-  if (name)
+/**
+ * pango_attr_type_register_full:
+ * @name: an identifier for the new type
+ * @parent_type: The base type
+ *
+ * Allocates a new attribute type ID that is based on an existing attribute.
+ * Attribute extensions may be up to four extensions 'deep', e.g.: Attribute
+ * A1 is not derived from another attribute; it may be derived into A2,
+ * which is then extended into A3, which is then extended into A4.  Any
+ * attempt to extend A4 will fail.  However, A1-A3 may be extended further.
+ *
+ *
+ * The attribute type name may be accessed later by using pango_attr_type_get_name().
+ **/
+PangoAttrType
+pango_attr_type_register_full (const gchar   *name,
+			       PangoAttrType  parent_type)
+{
+  guint new_subtype = 0;
+  PangoAttrType new_type = 0;
+  gpointer new_ptr;
+
+  /* This type cannot be extended any further. */
+  g_return_val_if_fail ((parent_type & 0xff000000) == 0, PANGO_ATTR_INVALID);
+  g_return_val_if_fail (name != NULL, PANGO_ATTR_INVALID);
+
+  if (G_UNLIKELY (!name_map)) {
+    name_map = g_hash_table_new (NULL, NULL);
+    type_map = g_hash_table_new (NULL, NULL);
+  }
+
+  new_type = parent_type << 8;
+  new_ptr = g_hash_table_lookup (type_map, GUINT_TO_POINTER (new_type));
+
+  if (new_ptr == NULL)
     {
-      if (G_UNLIKELY (!name_map))
-	name_map = g_hash_table_new (NULL, NULL);
-
-      g_hash_table_insert (name_map, GUINT_TO_POINTER (type), (gpointer) g_intern_string (name));
+      /* parent_type doesn't have any derived types yet, so start at 1. */
+      new_subtype = 1;
+      g_hash_table_insert (type_map, GUINT_TO_POINTER (new_type), GUINT_TO_POINTER (new_subtype));
+    } else {
+      /* There are already derived types.  Increment and store the latest one. */
+      new_subtype = GPOINTER_TO_UINT (new_ptr);
+      g_hash_table_replace (type_map, GUINT_TO_POINTER (new_type), GUINT_TO_POINTER (++new_subtype));
     }
 
-  return type;
+  new_type += new_subtype;
+
+  g_hash_table_insert (name_map, GUINT_TO_POINTER (new_type), (gpointer)g_intern_string (name));
+
+  return new_type;
+}
+
+/**
+ * pango_attr_type_get_parent_type:
+ * @attr_type: an attribute type to find the base type of
+ *
+ * Retrieves the base type of a given attribute.  If @attr_type is a
+ * type that was registered using pango_attr_register_full() then this
+ * will return the base type that was used.  If @attr_type is not extended
+ * from another type, this will return PANGO_ATTR_INVALID.
+ **/
+PangoAttrType
+pango_attr_type_get_parent_type (PangoAttrType attr_type)
+{
+  return attr_type >> 8;
+}
+
+gboolean
+pango_attr_type_is_a (const PangoAttrType attr,
+		      const PangoAttrType possible_ancestor)
+{
+  PangoAttrType test_attr = attr;
+  if (test_attr == possible_ancestor)
+    return TRUE;
+
+  do {
+    test_attr = test_attr >> 8;
+    if (test_attr == possible_ancestor)
+      return TRUE;
+  } while (test_attr & 0x0000ff00);
+
+  return FALSE;
+}
+
+static gboolean
+check_extended_type (guint test, guint mask, PangoAttrType attr, PangoAttrType ancestor)
+{
+  if (test)
+    {
+      if (((attr & mask) >> 8) == ancestor)
+	return TRUE;
+    }
+
+  return FALSE;
+}
+
+gboolean
+pango_attribute_is_a (const PangoAttribute *attr,
+		      const PangoAttrType   ancestor_type)
+{
+  return pango_attr_type_is_a (attr->klass->type, ancestor_type);
 }
 
 /**
@@ -477,7 +570,7 @@ pango_attr_size_copy (const PangoAttribute *attr)
 {
   const PangoAttrSize *size_attr = (PangoAttrSize *)attr;
 
-  if (attr->klass->type == PANGO_ATTR_ABSOLUTE_SIZE)
+  if (pango_attr_type_is_a (attr->klass->type, PANGO_ATTR_ABSOLUTE_SIZE))
     return pango_attr_size_new_absolute (size_attr->size);
   else
     return pango_attr_size_new (size_attr->size);
@@ -1773,7 +1866,7 @@ pango_attr_iterator_get (PangoAttrIterator *iterator,
     {
       PangoAttribute *attr = tmp_list->data;
 
-      if (attr->klass->type == type)
+      if (pango_attr_type_is_a (attr->klass->type, type))
 	return attr;
 
       tmp_list = tmp_list->next;
@@ -1831,74 +1924,88 @@ pango_attr_iterator_get_font (PangoAttrIterator     *iterator,
       PangoAttribute *attr = tmp_list1->data;
       tmp_list1 = tmp_list1->next;
 
-      switch ((int) attr->klass->type)
+      if (pango_attr_type_is_a (attr->klass->type, PANGO_ATTR_FONT_DESC))
 	{
-	case PANGO_ATTR_FONT_DESC:
-	  {
-	    PangoFontMask new_mask = pango_font_description_get_set_fields (((PangoAttrFontDesc *)attr)->desc) & ~mask;
-	    mask |= new_mask;
-	    pango_font_description_unset_fields (desc, new_mask);
-	    pango_font_description_merge_static (desc, ((PangoAttrFontDesc *)attr)->desc, FALSE);
+	  PangoFontMask new_mask = pango_font_description_get_set_fields (((PangoAttrFontDesc *)attr)->desc) & ~mask;
+	  mask |= new_mask;
+	  pango_font_description_unset_fields (desc, new_mask);
+	  pango_font_description_merge_static (desc, ((PangoAttrFontDesc *)attr)->desc, FALSE);
+	}
 
-	    break;
-	  }
-	case PANGO_ATTR_FAMILY:
+      if (pango_attr_type_is_a (attr->klass->type, PANGO_ATTR_FAMILY))
+	{
 	  if (!(mask & PANGO_FONT_MASK_FAMILY))
 	    {
 	      mask |= PANGO_FONT_MASK_FAMILY;
 	      pango_font_description_set_family (desc, ((PangoAttrString *)attr)->value);
 	    }
-	  break;
-	case PANGO_ATTR_STYLE:
+	}
+
+      if (pango_attr_type_is_a (attr->klass->type, PANGO_ATTR_STYLE))
+	{
 	  if (!(mask & PANGO_FONT_MASK_STYLE))
 	    {
 	      mask |= PANGO_FONT_MASK_STYLE;
 	      pango_font_description_set_style (desc, ((PangoAttrInt *)attr)->value);
 	    }
-	  break;
-	case PANGO_ATTR_VARIANT:
+	}
+
+      if (pango_attr_type_is_a (attr->klass->type, PANGO_ATTR_VARIANT))
+	{
 	  if (!(mask & PANGO_FONT_MASK_VARIANT))
 	    {
 	      mask |= PANGO_FONT_MASK_VARIANT;
 	      pango_font_description_set_variant (desc, ((PangoAttrInt *)attr)->value);
 	    }
-	  break;
-	case PANGO_ATTR_WEIGHT:
+	}
+
+      if (pango_attr_type_is_a (attr->klass->type, PANGO_ATTR_WEIGHT))
+	{
 	  if (!(mask & PANGO_FONT_MASK_WEIGHT))
 	    {
 	      mask |= PANGO_FONT_MASK_WEIGHT;
 	      pango_font_description_set_weight (desc, ((PangoAttrInt *)attr)->value);
 	    }
-	  break;
-	case PANGO_ATTR_STRETCH:
+	}
+
+      if (pango_attr_type_is_a (attr->klass->type, PANGO_ATTR_STRETCH))
+	{
 	  if (!(mask & PANGO_FONT_MASK_STRETCH))
 	    {
 	      mask |= PANGO_FONT_MASK_STRETCH;
 	      pango_font_description_set_stretch (desc, ((PangoAttrInt *)attr)->value);
 	    }
-	  break;
-	case PANGO_ATTR_SIZE:
+	}
+
+      if (pango_attr_type_is_a (attr->klass->type, PANGO_ATTR_SIZE))
+	{
 	  if (!(mask & PANGO_FONT_MASK_SIZE))
 	    {
 	      mask |= PANGO_FONT_MASK_SIZE;
 	      pango_font_description_set_size (desc, ((PangoAttrSize *)attr)->size);
 	    }
-	  break;
-	case PANGO_ATTR_ABSOLUTE_SIZE:
+	}
+
+      if (pango_attr_type_is_a (attr->klass->type, PANGO_ATTR_ABSOLUTE_SIZE))
+	{
 	  if (!(mask & PANGO_FONT_MASK_SIZE))
 	    {
 	      mask |= PANGO_FONT_MASK_SIZE;
 	      pango_font_description_set_absolute_size (desc, ((PangoAttrSize *)attr)->size);
 	    }
-	  break;
-	case PANGO_ATTR_SCALE:
+	}
+
+      if (pango_attr_type_is_a (attr->klass->type, PANGO_ATTR_SCALE))
+	{
 	  if (!have_scale)
 	    {
 	      have_scale = TRUE;
 	      scale = ((PangoAttrFloat *)attr)->value;
 	    }
-	  break;
-	case PANGO_ATTR_LANGUAGE:
+	}
+
+      if (pango_attr_type_is_a (attr->klass->type, PANGO_ATTR_LANGUAGE))
+	{
 	  if (language)
 	    {
 	      if (!have_language)
@@ -1907,28 +2014,27 @@ pango_attr_iterator_get_font (PangoAttrIterator     *iterator,
 		  *language = ((PangoAttrLanguage *)attr)->value;
 		}
 	    }
-	  break;
-	default:
-	  if (extra_attrs)
+	}
+
+      if (extra_attrs)
+	{
+	  gboolean found = FALSE;
+
+	  tmp_list2 = *extra_attrs;
+	  while (tmp_list2)
 	    {
-	      gboolean found = FALSE;
-
-	      tmp_list2 = *extra_attrs;
-	      while (tmp_list2)
+	      PangoAttribute *old_attr = tmp_list2->data;
+	      if (attr->klass->type == old_attr->klass->type)
 		{
-		  PangoAttribute *old_attr = tmp_list2->data;
-		  if (attr->klass->type == old_attr->klass->type)
-		    {
-		      found = TRUE;
-		      break;
-		    }
-
-		  tmp_list2 = tmp_list2->next;
+		  found = TRUE;
+		  break;
 		}
 
-	      if (!found)
-		*extra_attrs = g_slist_prepend (*extra_attrs, pango_attribute_copy (attr));
+	      tmp_list2 = tmp_list2->next;
 	    }
+
+	  if (!found)
+	    *extra_attrs = g_slist_prepend (*extra_attrs, pango_attribute_copy (attr));
 	}
     }
 

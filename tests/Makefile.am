@@ -41,9 +41,9 @@ TESTS_ENVIRONMENT =                    \
    srcdir=$(srcdir)                    \
    PANGO_RC_FILE=./pangorc
 
-noinst_PROGRAMS = gen-all-unicode dump-boundaries 
+noinst_PROGRAMS = gen-all-unicode dump-boundaries testattributes
 
-check_PROGRAMS = testboundaries testboundaries_ucd testcolor testscript
+check_PROGRAMS = testboundaries testboundaries_ucd testcolor testscript 
 
 if HAVE_CAIRO
 check_PROGRAMS += testiter
@@ -55,6 +55,8 @@ endif
 gen_all_unicode_LDADD = $(GLIB_LIBS)
 testboundaries_LDADD = ../pango/libpango-$(PANGO_API_VERSION).la
 testboundaries_ucd_LDADD = ../pango/libpango-$(PANGO_API_VERSION).la
+testattributes_SOURCES = testattributes.c
+testattributes_LDADD = ../pango/libpango-$(PANGO_API_VERSION).la
 testcolor_LDADD = ../pango/libpango-$(PANGO_API_VERSION).la
 testiter_LDADD = ../pango/libpango-$(PANGO_API_VERSION).la ../pango/libpangocairo-$(PANGO_API_VERSION).la 
 testscript_LDADD = ../pango/libpango-$(PANGO_API_VERSION).la

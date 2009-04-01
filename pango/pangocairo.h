@@ -102,8 +102,16 @@ void                        pango_cairo_context_set_shape_renderer (PangoContext
 								    PangoCairoShapeRendererFunc  func,
 								    gpointer                     data,
 								    GDestroyNotify               dnotify);
-PangoCairoShapeRendererFunc pango_cairo_context_get_shape_renderer (PangoContext                *context,
-								    gpointer                    *data);
+void          pango_cairo_context_set_shape_renderer_for_attr_type (PangoContext                *context,
+								    PangoAttrType                attr_type,
+								    PangoCairoShapeRendererFunc  func,
+								    gpointer                     data,
+								    GDestroyNotify               dnotify);
+PangoCairoShapeRendererFunc pango_cairo_context_get_shape_renderer               (PangoContext   *context,
+										  gpointer       *data);
+PangoCairoShapeRendererFunc pango_cairo_context_get_shape_renderer_for_attr_type (PangoContext   *context,
+										  PangoAttrType   attr_type,
+										  gpointer       *data);
 
 /* Convenience
  */
